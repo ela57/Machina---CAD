@@ -339,9 +339,10 @@ def main():
             newpaths[r["path"]] = np_
         if a.phase == "report":
             from .report import write_readme
-            write_readme(a.readme, read_manifest(a.manifest), newpaths, defects, a.out)
+            write_readme(a.readme, read_manifest(a.manifest), newpaths, defects, a.out, state / "written.tsv")
             return
         out = Path(a.out)
+        ledger = open(state / "written.tsv", "a", encoding="utf-8", buffering=1)  # every output written, across resumed/emptied runs
         seen = {}
         seen_file = state / "md5_out.json"
         if seen_file.exists():
@@ -387,6 +388,7 @@ def main():
                         if dst.exists():
                             dst.unlink()
                         os.link(Path(out, seen[key]), dst)
+                        ledger.write(f"{newp}\t{dst.stat().st_size}\t1\n")
                     continue
                 futs[pool.submit(transform_one, str(src), dst, ext)] = (r, newp, complete)
         for fu in cf.as_completed(futs):
@@ -403,6 +405,7 @@ def main():
                     data = src.read_bytes()
                     (out / newp).parent.mkdir(parents=True, exist_ok=True)
                     (out / newp).write_bytes(_W["m"].replace(data, binary=not looks_text(data))[0])
+                    ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t0\n")
                     defects.setdefault(r["path"], "format rewrite failed (%s); identifiers replaced byte-wise" % type(e).__name__)
                 continue
             if a.phase == "harvest":
@@ -412,6 +415,7 @@ def main():
                 r, newp, complete = info
                 if r["md5"] and complete:
                     seen[r["md5"]] = newp
+                ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t0\n")
                 notes = [NOTE_DEFECTS[k] for k in NOTE_DEFECTS if res.get(k)]
                 if notes and r["path"] not in defects:
                     defects[r["path"]] = "; ".join(notes)

@@ -50,18 +50,23 @@ Known limitations
 """
 
 
-def write_readme(path, rows, newpaths, defects, out):
-    n_out = n_bytes = n_links = 0
-    seen_inodes = set()
-    for root, _d, files in os.walk(out):
-        for fn in files:
-            st = os.stat(Path(root, fn))
-            n_out += 1
-            if st.st_ino in seen_inodes:
-                n_links += 1
-            else:
-                seen_inodes.add(st.st_ino)
-                n_bytes += st.st_size
+def write_readme(path, rows, newpaths, defects, out, ledger=None):
+    written = {}
+    if ledger and Path(ledger).exists():
+        for line in open(ledger, encoding="utf-8"):
+            p, size, dup = line.rstrip("\n").split("\t")
+            written[p] = (int(size), dup == "1")
+    else:
+        inodes = set()
+        for root, _d, files in os.walk(out):
+            for fn in files:
+                q = Path(root, fn)
+                st = os.stat(q)
+                written[q.relative_to(out).as_posix()] = (st.st_size, st.st_ino in inodes)
+                inodes.add(st.st_ino)
+    n_out = len(written)
+    n_links = sum(1 for _s, d in written.values() if d)
+    n_bytes = sum(s for s, d in written.values() if not d)
     kinds = collections.Counter(defects.values())
     with open(path, "w", encoding="utf-8") as f:
         f.write("Machina CAD de-identification: submission\n\n")
@@ -72,7 +77,7 @@ def write_readme(path, rows, newpaths, defects, out):
         f.write(f"  manifest entries: {len(rows)}\n  files in corpus/: {n_out} "
                 f"({n_links} are byte-identical duplicates of another output)\n")
         f.write(f"  unique output bytes: {n_bytes}\n  files with a recorded defect: {len(defects)}\n")
-        missing = [r for r in rows if not Path(out, newpaths.get(r["path"], "\0")).exists()]
+        missing = [r for r in rows if newpaths.get(r["path"]) not in written]
         f.write(f"  manifest entries with no output file: {len(missing)}\n\n")
         f.write("Defects by kind\n")
         for k, c in kinds.most_common():
