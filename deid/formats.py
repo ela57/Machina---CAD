@@ -264,6 +264,7 @@ def process_bytes(data, ext, ctx, depth=0):
                     raise ValueError("gzip data larger than limit")
                 parts.append(part)
             raw = b"".join(parts)
+            del parts
         except Exception:
             ctx.note("gzip_unreadable")
             return generic(data, ctx)
