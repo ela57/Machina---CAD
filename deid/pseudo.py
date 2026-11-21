@@ -8,7 +8,6 @@ import hashlib
 import hmac
 import json
 import os
-import unicodedata
 
 CONS = "bcdfghjklmnprstvz"
 VOWS = "aeiou"

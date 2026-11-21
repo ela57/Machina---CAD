@@ -2,15 +2,12 @@
 (pass 1) or rewrite files (pass 2), then delete the raw input."""
 import argparse
 import concurrent.futures as cf
-import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -181,6 +178,7 @@ def main():
     ap.add_argument("--dl-jobs", type=int, default=24)
     ap.add_argument("--only", help="only groups containing this substring")
     ap.add_argument("--stop-out-gb", type=float, default=0, help="stop when --out grows beyond this")
+    ap.add_argument("--batch-gb", type=float, default=3.0, help="raw bytes per download/process batch")
     ap.add_argument("--salt", default=os.environ.get("DEID_SALT", "machina-deid"))
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -213,12 +211,35 @@ def main():
     defects = json.loads((state / "defects.json").read_text()) if (state / "defects.json").exists() else {}
     dl = cf.ThreadPoolExecutor(a.dl_jobs)
 
-    def fetch(r):
+    def fetch(r, sub):
         if a.input:
             return Path(a.input, r["path"])
-        p = work / r["path"]
+        p = work / sub / r["path"]
         download(r, p, a.base)
         return p
+
+    # merge small source groups into batches so the worker pool stays busy
+    batches, cur, cur_bytes, cur_n = [], [], 0, 0
+    for gname, grows in grp.items():
+        if gname in done:
+            continue
+        for k, r in enumerate(grows):
+            if not cur or cur[-1][0] != gname:
+                cur.append((gname, [], False))
+            cur[-1][1].append(r)
+            cur_bytes += r["size"]
+            cur_n += 1
+            if k == len(grows) - 1:
+                cur[-1] = (gname, cur[-1][1], True)
+            if cur_bytes > a.batch_gb * 1e9 or cur_n >= 4000:
+                batches.append(cur)
+                cur, cur_bytes, cur_n = [], 0, 0
+    if cur:
+        batches.append(cur)
+
+    def fetch_batch(i):
+        rows_ = [r for _g, gr, _l in batches[i] for r in gr]
+        return list(dl.map(lambda r: fetch(r, f"b{i}"), rows_))
 
     def build_matcher():
         if seeds.exists():
@@ -244,11 +265,14 @@ def main():
     else:
         pool = cf.ProcessPoolExecutor(a.jobs)
 
-    for gname, grows in grp.items():
-        if gname in done:
-            continue
+    prefetch = cf.ThreadPoolExecutor(1)
+    nxt = prefetch.submit(fetch_batch, 0) if batches else None
+    harvested_md5 = set()
+    for bi, batch in enumerate(batches):
         t0 = time.time()
-        srcs = list(dl.map(fetch, grows))
+        grows = [r for _g, gr, _l in batch for r in gr]
+        srcs = nxt.result()
+        nxt = prefetch.submit(fetch_batch, bi + 1) if bi + 1 < len(batches) else None
         futs = {}
         for r, src in zip(grows, srcs):
             ext = ext_of(r["path"])
@@ -259,6 +283,9 @@ def main():
             if r["size"] == 0 or sz == 0:
                 defects[r["path"]] = "zero-byte file in source" if r["size"] == 0 else "not downloadable from mirror"
             if a.phase == "harvest":
+                if r["md5"] and r["md5"] in harvested_md5:
+                    continue
+                harvested_md5.add(r["md5"])
                 futs[pool.submit(harvest_one, str(src), ext)] = r
             else:
                 with open(src, "rb") as f:
@@ -285,7 +312,7 @@ def main():
                 if a.phase == "transform":
                     # never drop a file: fall back to plain same-length replacement
                     newp = info[1]
-                    src = (Path(a.input) if a.input else work) / r["path"]
+                    src = Path(a.input, r["path"]) if a.input else work / f"b{bi}" / r["path"]
                     data = src.read_bytes()
                     (out / newp).parent.mkdir(parents=True, exist_ok=True)
                     (out / newp).write_bytes(_W["m"].replace(data)[0])
@@ -301,14 +328,14 @@ def main():
                 if res.get("sw_record_unfit"):
                     defects.setdefault(r["path"], "some compressed SolidWorks records could not be rewritten in place")
         if not a.input:
-            shutil.rmtree(work, ignore_errors=True)
-        done.add(gname)
+            shutil.rmtree(work / f"b{bi}", ignore_errors=True)
+        done.update(g for g, _gr, last in batch if last)
         done_file.write_text("\n".join(sorted(done)))
         ids_file.write_text(json.dumps(ids, ensure_ascii=False, sort_keys=True, indent=0))
         (state / "defects.json").write_text(json.dumps(defects, ensure_ascii=False, indent=0, sort_keys=True))
         if a.phase == "transform":
             seen_file.write_text(json.dumps(seen))
-        log.info("%s %s: %d files in %.0fs (ids=%d)", a.phase, gname, len(grows), time.time() - t0, len(ids))
+        log.info("%s batch %d/%d (%s ...): %d files in %.0fs (ids=%d)", a.phase, bi + 1, len(batches), batch[0][0], len(grows), time.time() - t0, len(ids))
         if a.phase == "transform" and a.stop_out_gb:
             used = int(subprocess.run(["du", "-sb", str(out)], capture_output=True, text=True).stdout.split()[0])
             if used > a.stop_out_gb * 1e9:
