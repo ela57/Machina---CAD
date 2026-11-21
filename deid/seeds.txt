@@ -43,3 +43,14 @@ jobin-yvon	org
 jobin	org
 yvon	org
 mabuchi	org
+aarhus	org
+dominique	first
+kanpur	org
+iitk	org
+ljubljana	org
+southampton	org
+stuttgart	org
+delft	org
+vhéliotech	org
+vhélio	org
+muzi	org
