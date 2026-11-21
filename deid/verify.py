@@ -45,7 +45,8 @@ def main():
     a = ap.parse_args()
     ids = json.loads(Path(a.state, "ids.json").read_text())
     pm = json.loads(Path(a.state, "pseudonyms.json").read_text())
-    keep, proper_only = content_tokens(ids)
+    pf = Path(a.state, "pinned.json")
+    keep, proper_only = content_tokens(ids, set(json.loads(pf.read_text())) if pf.exists() else ())
     tm = {t: pm[t] for t in keep if t in pm}
     files = [Path(r, f) for r, _d, fs in os.walk(a.out) for f in fs]
     total, per_tok, flagged = collections.Counter(), collections.Counter(), 0

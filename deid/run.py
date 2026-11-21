@@ -115,11 +115,13 @@ pdf-tools swing-layout
 """.split())
 
 
-def drop_token(t):
+def drop_token(t, pinned=()):
+    if t in pinned:  # named by the manifest path itself (repo owner, project, site)
+        return len(set(t)) <= 2
     return t in NOT_IDENTITIES or len(set(t)) <= 2
 
 
-def content_tokens(ids):
+def content_tokens(ids, pinned=()):
     """(tokens safe to replace inside file contents, tokens that are also ordinary words and
     are replaced only when Capitalized).  Paths use every token except NOT_IDENTITIES."""
     from wordfreq import zipf_frequency
@@ -127,11 +129,11 @@ def content_tokens(ids):
     lower_words, proper_words = _dictionary()
     keep, proper_only = {}, set()
     for t, k in ids.items():
-        if len(t) < 4 or drop_token(t):
+        if len(t) < 4 or drop_token(t, pinned):
             continue
         if t in lower_words:
             name = t in proper_words or k in ("person", "first", "last")
-            if t not in proper_words and zipf_frequency(t, "en") >= 4.0:
+            if t not in pinned and t not in proper_words and zipf_frequency(t, "en") >= 4.0:
                 continue
             if not name and len(t) == 4:
                 continue
@@ -322,10 +324,15 @@ def main():
                 if line and not line.startswith("#"):
                     tok, _, kind = line.partition("\t")
                     ids.setdefault(tok.lower(), kind or "org")
+        ph = Harvest()
+        for r in read_manifest(a.manifest):
+            ph.from_path(r["path"])
+        pinned = set(ph.ids) & set(ids)
+        (state / "pinned.json").write_text(json.dumps(sorted(pinned)))
         reg.reserved = set(ids)
-        pm = {t: reg.get(t, k) for t, k in ids.items() if not drop_token(t)}
+        pm = {t: reg.get(t, k) for t, k in ids.items() if not drop_token(t, pinned)}
         reg.save(state / "pseudonyms.json")
-        keep, proper_only = content_tokens(ids)
+        keep, proper_only = content_tokens(ids, pinned)
         tm = {t: pm[t] for t in keep}
         exact = [t for t in pm if len(t) <= 4]
         return tm, exact, pm, proper_only
