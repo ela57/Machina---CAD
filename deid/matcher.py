@@ -134,8 +134,11 @@ class Matcher:
         n = self._char_after(data, end, enc)
         if tok in self.exact and orig != tok and orig != tok.upper() and orig != tok.capitalize():
             return False
-        if tok in self.whole and ((p is not None and p.isalnum()) or (n is not None and n.isalnum())):
-            return False
+        if tok in self.whole:
+            # %2F / %5C are URL-encoded path separators in links
+            sep = enc != "utf-16-le" and start >= 3 and data[start - 3:start].lower() in (b"%2f", b"%5c")
+            if (p is not None and p.isalnum() and not sep) or (n is not None and n.isalnum()):
+                return False
         long_tok = len(tok) >= 8
         if p is not None and p.isalnum():
             if not (long_tok or (p.isdigit() and f.isalpha()) or ((p.islower() or p.isdigit()) and f.isupper())):
