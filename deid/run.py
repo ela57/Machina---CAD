@@ -108,7 +108,7 @@ canada mexico brazil russia europe asia africa america australia taiwan poland s
 finland netherlands holland belgium switzerland austria portugal greece turkey israel egypt
 ukraine vietnam thailand singapore malaysia indonesia iran pakistan argentina chile colombia
 peru york london paris berlin tokyo beijing shanghai california texas florida kentucky ohio
-washington oregon michigan illinois virginia georgia carolina boston chicago seattle jesus christ
+washington oregon illinois virginia georgia carolina boston chicago seattle jesus christ
 god user-images git-lfs raw.githubusercontent github gitlab gitee
 """.split())
 
