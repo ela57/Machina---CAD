@@ -9,10 +9,20 @@ import tarfile
 import zipfile
 import zlib
 
+from .matcher import looks_text
+
 log = logging.getLogger("deid")
 
 SW_MARK = re.compile(rb"\x14\x00\x06\x00\x08\x00")
 SW_EXT = {".sldprt", ".sldasm", ".slddrw", ".prtdot", ".asmdot", ".drwdot", ".sldlfp", ".slddrt"}
+
+
+GUNZIP_LIMIT = 4 * 2**30
+
+
+def generic(data, ctx):
+    """Same-length replacement in raw bytes; strict string-context matching for binary data."""
+    return ctx.m.replace(data, binary=not looks_text(data))[0]
 
 
 class Ctx:
@@ -61,6 +71,7 @@ def solidworks_records(data, ctx):
     """SolidWorks 2015+ container (and OLE-wrapped variants): each record is
     marker, crc, csize, usize, name-length, nibble-rotated name, raw-deflate data."""
     buf = bytearray(data)
+    payloads = []
     for mt in SW_MARK.finditer(data):
         i = mt.start()
         if i + 26 > len(data):
@@ -69,6 +80,7 @@ def solidworks_records(data, ctx):
         if nlen > 512 or csize == 0 or csize > len(data):
             continue
         s = i + 26 + nlen
+        payloads.append((s, s + csize))
         comp = data[s:s + csize]
         o = zlib.decompressobj(-15)
         try:
@@ -81,7 +93,8 @@ def solidworks_records(data, ctx):
         nname, nn = ctx.m.replace(name)
         if nn:
             buf[i + 26:s] = bytes(((b << 4) | (b >> 4)) & 0xFF for b in nname)
-        new, n = ctx.m.replace(raw)
+        raw_bin = not looks_text(raw)
+        new, n = ctx.m.replace(raw, binary=raw_bin)
         if not n:
             continue
         new = process_bytes(new, name.decode("latin-1", "replace").lower(), ctx, depth=1) if name.lower().endswith((b".xml", b".png", b".jpg", b".bmp")) else new
@@ -91,6 +104,10 @@ def solidworks_records(data, ctx):
             new = re.sub(rb">\s+<", lambda w: b">" + b" " * (len(w.group(0)) - 2) + b"<", new)
             comp2 = _deflate_fit(new, csize)
         if comp2 is None:
+            new = ctx.m.replace(raw, filler=True, binary=raw_bin)[0]
+            comp2 = _deflate_fit(new, csize)
+            ctx.note("sw_record_masked")
+        if comp2 is None:
             ctx.note("sw_record_unfit")
             continue
         comp2 = comp2 + b"\x00" * (csize - len(comp2))
@@ -98,7 +115,17 @@ def solidworks_records(data, ctx):
         if crc == (zlib.crc32(raw) & 0xFFFFFFFF):
             struct.pack_into("<I", buf, i + 10, zlib.crc32(new) & 0xFFFFFFFF)
         ctx.note("sw_record_rewritten")
-    return bytes(buf)
+    # plain (uncompressed) regions between record payloads: OLE streams, headers, names
+    out = bytearray()
+    pos = 0
+    for a, b in sorted(payloads):
+        if a < pos:
+            continue
+        out += generic(bytes(buf[pos:a]), ctx)
+        out += buf[a:b]
+        pos = b
+    out += generic(bytes(buf[pos:]), ctx)
+    return bytes(out)
 
 
 def rewrite_zip(data, ctx, depth):
@@ -107,7 +134,7 @@ def rewrite_zip(data, ctx, depth):
         infos = zin.infolist()
     except Exception:
         ctx.note("zip_unreadable")
-        return ctx.m.replace(data)[0]
+        return generic(data, ctx)
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", allowZip64=True) as zout:
         for info in infos:
@@ -136,12 +163,14 @@ def rewrite_tar(data, ctx, depth, mode="r:"):
         members = tin.getmembers()
     except Exception:
         ctx.note("tar_unreadable")
-        return ctx.m.replace(data)[0]
+        return generic(data, ctx)
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w", format=tarfile.PAX_FORMAT) as tout:
         for mem in members:
             nm = tarfile.TarInfo("/".join(ctx.rename(p) for p in mem.name.split("/")))
             nm.mode, nm.mtime, nm.type = mem.mode, mem.mtime, mem.type
+            if mem.issparse():
+                nm.type = tarfile.REGTYPE  # written out densely below
             nm.uname = nm.gname = ""
             if mem.issym() or mem.islnk():
                 nm.linkname = "/".join(ctx.rename(p) for p in mem.linkname.split("/"))
@@ -162,7 +191,7 @@ def rewrite_pdf(data, ctx, depth):
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception:
         ctx.note("pdf_unreadable")
-        return ctx.m.replace(data)[0]
+        return generic(data, ctx)
     try:
         md = doc.metadata or {}
         newmd = {k: ctx.m.replace_str(v) if isinstance(v, str) else v for k, v in md.items() if k in
@@ -208,10 +237,10 @@ def rewrite_pdf(data, ctx, depth):
     except Exception as e:
         log.warning("pdf rewrite failed: %s", e)
         ctx.note("pdf_rewrite_failed")
-        return ctx.m.replace(data)[0]
+        return generic(data, ctx)
     finally:
         doc.close()
-    return ctx.m.replace(out)[0]
+    return generic(out, ctx)
 
 
 def process_bytes(data, ext, ctx, depth=0):
@@ -224,10 +253,13 @@ def process_bytes(data, ext, ctx, depth=0):
         return rewrite_zip(data, ctx, depth)
     if head.startswith(b"\x1f\x8b"):
         try:
-            raw = gzip.decompress(data)
+            d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            raw = d.decompress(data, GUNZIP_LIMIT)
+            if d.unconsumed_tail or not d.eof:
+                raise ValueError("gzip member too large or truncated")
         except Exception:
             ctx.note("gzip_unreadable")
-            return ctx.m.replace(data)[0]
+            return generic(data, ctx)
         inner = ext[:-3] if ext.endswith(".gz") else ext
         if len(raw) > 262 and raw[257:262] == b"ustar":
             new = rewrite_tar(raw, ctx, depth)
@@ -237,5 +269,5 @@ def process_bytes(data, ext, ctx, depth=0):
     if len(data) > 262 and data[257:262] == b"ustar":
         return rewrite_tar(data, ctx, depth)
     if ext in SW_EXT or SW_MARK.search(data[:65536]):
-        data = solidworks_records(data, ctx)
-    return ctx.m.replace(data)[0]
+        return solidworks_records(data, ctx)
+    return generic(data, ctx)

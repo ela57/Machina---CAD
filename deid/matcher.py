@@ -11,6 +11,28 @@ def _isalnum_ch(c):
     return c.isalnum()
 
 
+_PRINTABLE = frozenset(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
+
+
+def looks_text(data, n=8192):
+    """True when the sample is almost entirely printable ASCII / UTF-8 text."""
+    sample = data[:n]
+    if not sample:
+        return True
+    bad = sum(1 for b in sample if b not in _PRINTABLE and b < 0x80)
+    return bad <= len(sample) // 100
+
+
+def _printable_run(data, start, end, limit=16):
+    """Number of printable single-byte characters around data[start:end] (inclusive)."""
+    i, j = start, end
+    while i > 0 and start - i < limit and data[i - 1] in _PRINTABLE:
+        i -= 1
+    while j < len(data) and j - end < limit and data[j] in _PRINTABLE:
+        j += 1
+    return j - i
+
+
 class Matcher:
     def __init__(self, token_map, exact_case=()):
         """token_map: lowercase token -> lowercase pseudonym (same length)."""
@@ -85,10 +107,15 @@ class Matcher:
                 continue
         return chr(b)
 
-    def _ok(self, data, start, end, orig, tok, enc):
+    def _ok(self, data, start, end, orig, tok, enc, binary=False):
         if enc == "utf-16-le" and start % 2 == 1:
             # allow odd alignment only if surrounded by sane chars; most strings are aligned
             pass
+        if binary and enc != "utf-16-le" and len(tok) < 8:
+            # inside binary data only rewrite tokens that sit in a real text string, so
+            # compressed or numeric payloads are never altered by a chance byte match
+            if _printable_run(data, start, end) < max(8, end - start + 3):
+                return False
         f, l = orig[0], orig[-1]
         p = self._char_before(data, start, enc)
         n = self._char_after(data, end, enc)
@@ -103,8 +130,9 @@ class Matcher:
                 return False
         return True
 
-    def replace(self, data: bytes):
-        """Return (new_bytes, count)."""
+    def replace(self, data: bytes, filler=False, binary=False):
+        """Return (new_bytes, count). filler=True writes a low-entropy 'x' run instead of the
+        pseudonym (last resort where a pseudonym would not fit a fixed compressed size)."""
         if self.empty or not data:
             return data, 0
         hay = data.decode("latin-1").lower()
@@ -130,8 +158,10 @@ class Matcher:
                 continue
             if orig.lower() != tok and orig.casefold() != tok.casefold():
                 continue
-            if not self._ok(data, start, end, orig, tok, enc):
+            if not self._ok(data, start, end, orig, tok, enc, binary):
                 continue
+            if filler:
+                ps = "".join("x" if c.isascii() else c for c in ps)
             rep = apply_case(ps, orig).encode(enc)
             if len(rep) != end - start:
                 rep = ps.encode(enc)
