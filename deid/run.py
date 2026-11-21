@@ -400,7 +400,7 @@ def main():
                     defects[r["path"]] = "source file is an HTML 'Not Found' page, not a %s file" % (ext or "data")
                 newp = newpaths[r["path"]]
                 dst = out / newp
-                key = r["md5"] if complete else ""
+                key = r["md5"] + ext if complete and r["md5"] else ""
                 if key and key in seen and Path(out, seen[key]).exists():
                     if seen[key] != newp:
                         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -438,14 +438,15 @@ def main():
                 notes = [NOTE_DEFECTS[k] for k in NOTE_DEFECTS if res.get(k)]
                 if notes and r["path"] not in defects:
                     defects[r["path"]] = "; ".join(notes)
-                first = seen.get(r["md5"]) if r["md5"] and complete else None
+                key = r["md5"] + ext_of(r["path"]) if r["md5"] and complete else ""
+                first = seen.get(key) if key else None
                 if first and first != newp and Path(out, first).exists():
                     (out / newp).unlink()
                     os.link(Path(out, first), out / newp)
                     ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t1\n")
                     continue
-                if r["md5"] and complete:
-                    seen[r["md5"]] = newp
+                if key:
+                    seen[key] = newp
                 ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t0\n")
         if not a.input:
             shutil.rmtree(work / f"b{bi}", ignore_errors=True)
