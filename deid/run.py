@@ -133,7 +133,7 @@ def content_tokens(ids, pinned=()):
             continue
         if t in lower_words:
             name = t in proper_words or k in ("person", "first", "last")
-            if t not in pinned and t not in proper_words and zipf_frequency(t, "en") >= 4.0:
+            if t not in proper_words and zipf_frequency(t, "en") >= 4.0:  # paths only
                 continue
             if not name and len(t) == 4:
                 continue
