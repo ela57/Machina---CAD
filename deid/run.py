@@ -100,22 +100,44 @@ def safe_rel(path):
     return path and not p.is_absolute() and ".." not in p.parts
 
 
+NOT_IDENTITIES = set("""
+monday tuesday wednesday thursday friday saturday sunday january february march april may june
+july august september october november december red green blue black white grey gray yellow orange
+purple pink brown silver gold china england britain france germany italy spain japan korea india
+canada mexico brazil russia europe asia africa america australia taiwan poland sweden norway denmark
+finland netherlands holland belgium switzerland austria portugal greece turkey israel egypt
+ukraine vietnam thailand singapore malaysia indonesia iran pakistan argentina chile colombia
+peru york london paris berlin tokyo beijing shanghai california texas florida kentucky ohio
+washington oregon michigan illinois virginia georgia carolina boston chicago seattle jesus christ
+god user-images git-lfs raw.githubusercontent github gitlab gitee
+""".split())
+
+
+def drop_token(t):
+    return t in NOT_IDENTITIES or len(set(t)) <= 2
+
+
 def content_tokens(ids):
-    """Tokens safe to replace inside file contents (paths use every token)."""
+    """(tokens safe to replace inside file contents, tokens that are also ordinary words and
+    are replaced only when Capitalized).  Paths use every token except NOT_IDENTITIES."""
+    from wordfreq import zipf_frequency
     from .harvest import _dictionary
     lower_words, proper_words = _dictionary()
-    keep = {}
+    keep, proper_only = {}, set()
     for t, k in ids.items():
-        if len(t) < 4 or len(set(t)) <= 2:
+        if len(t) < 4 or drop_token(t):
             continue
-        if len(t) == 4 and t in lower_words and t not in proper_words:
-            continue
+        if t in lower_words:
+            name = t in proper_words or k in ("person", "first", "last")
+            if not name and (len(t) == 4 or zipf_frequency(t, "en") >= 4.0):
+                continue
+            proper_only.add(t)
         keep[t] = k
-    return keep
+    return keep, proper_only
 
 
-def _init_worker(token_map, exact, path_map):
-    _W["m"] = Matcher(token_map, exact)
+def _init_worker(token_map, exact, path_map, proper_only=()):
+    _W["m"] = Matcher(token_map, exact, proper_only)
     _W["p"] = Matcher(path_map, exact)
 
 
@@ -292,16 +314,17 @@ def main():
                 if line and not line.startswith("#"):
                     tok, _, kind = line.partition("\t")
                     ids.setdefault(tok.lower(), kind or "org")
-        pm = {t: reg.get(t, k) for t, k in ids.items()}
+        pm = {t: reg.get(t, k) for t, k in ids.items() if not drop_token(t)}
         reg.save(state / "pseudonyms.json")
-        tm = {t: pm[t] for t in content_tokens(ids)}
+        keep, proper_only = content_tokens(ids)
+        tm = {t: pm[t] for t in keep}
         exact = [t for t in pm if len(t) <= 4]
-        return tm, exact, pm
+        return tm, exact, pm, proper_only
 
     if a.phase in ("transform", "report"):
-        tm, exact, pm = build_matcher()
-        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm))
-        _init_worker(tm, exact, pm)
+        tm, exact, pm, proper_only = build_matcher()
+        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm, proper_only))
+        _init_worker(tm, exact, pm, proper_only)
         # output paths for the whole manifest up front, so renames never collide
         newpaths, claimed = {}, set()
         for r in read_manifest(a.manifest):

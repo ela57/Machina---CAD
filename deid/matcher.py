@@ -34,10 +34,11 @@ def _printable_run(data, start, end, limit=16):
 
 
 class Matcher:
-    def __init__(self, token_map, exact_case=()):
+    def __init__(self, token_map, exact_case=(), proper_only=()):
         """token_map: lowercase token -> lowercase pseudonym (same length)."""
         self.token_map = dict(token_map)
         self.exact = set(exact_case)
+        self.proper_only = set(proper_only)  # also ordinary words: replace only when Capitalized
         self.auto = ahocorasick.Automaton()
         n = 0
         for tok, ps in self.token_map.items():
@@ -117,6 +118,8 @@ class Matcher:
             if _printable_run(data, start, end) < max(8, end - start + 3):
                 return False
         f, l = orig[0], orig[-1]
+        if tok in self.proper_only and not f.isupper():
+            return False
         p = self._char_before(data, start, enc)
         n = self._char_after(data, end, enc)
         if tok in self.exact and orig != tok and orig != tok.upper() and orig != tok.capitalize():
