@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 
+from .formats import SW_MARK, sw_iter_records
 from .matcher import Matcher, looks_text
 from .run import content_tokens
 
@@ -24,15 +25,15 @@ def scan(path):
             buf = f.read(64 * 2**20)
             if not buf:
                 break
-            new, n = m.replace(buf, binary=not looks_text(buf))
-            if n:
-                for i in range(0, len(buf)):
-                    if buf[i] != new[i]:
-                        j = i
-                        while j < len(buf) and buf[j] != new[j]:
-                            j += 1
-                        hits[buf[i:j].decode("latin-1").lower()] += 1
-                        break
+            if m.replace(buf, binary=not looks_text(buf))[1]:
+                for t, c in m.matched(buf, binary=not looks_text(buf)).items():
+                    hits[t] += c
+    if path.suffix.lower() in (".sldprt", ".sldasm", ".slddrw") and path.stat().st_size < 2**30:
+        data = path.read_bytes()
+        if SW_MARK.search(data):
+            for _name, raw in sw_iter_records(data):  # compressed records: scan their contents
+                for t, c in m.matched(raw, binary=not looks_text(raw)).items():
+                    hits[t] += c
     return str(path), hits
 
 
