@@ -97,6 +97,7 @@ class Registry:
         self.salt = salt
         self.fwd = {}
         self.rev = {}
+        self.reserved = set()  # real identities: never handed out as someone else's pseudonym
 
     def key(self, token):
         return token.lower()
@@ -118,7 +119,7 @@ class Registry:
                 else:
                     out.append(_char_like(c, h[(i * 7 + n) % len(h)]))
             p = "".join(out)
-            if p != k and p not in self.rev and p not in self.fwd:
+            if p != k and p not in self.rev and p not in self.fwd and p not in self.reserved:
                 break
             n += 1
             if n > 50:

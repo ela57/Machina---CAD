@@ -271,6 +271,10 @@ def main():
         for tok, kind in h.ids.items():
             ids.setdefault(tok, kind)
     reg = Registry.load(state / "pseudonyms.json", a.salt.encode())
+    reg.reserved = set(ids)
+    for k, v in list(reg.fwd.items()):
+        if v in reg.reserved:
+            del reg.fwd[k], reg.rev[v]
     work = Path(a.work)
     defects = json.loads((state / "defects.json").read_text()) if (state / "defects.json").exists() else {}
     for r in unsafe:
@@ -314,6 +318,7 @@ def main():
                 if line and not line.startswith("#"):
                     tok, _, kind = line.partition("\t")
                     ids.setdefault(tok.lower(), kind or "org")
+        reg.reserved = set(ids)
         pm = {t: reg.get(t, k) for t, k in ids.items() if not drop_token(t)}
         reg.save(state / "pseudonyms.json")
         keep, proper_only = content_tokens(ids)
