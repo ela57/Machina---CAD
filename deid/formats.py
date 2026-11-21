@@ -254,9 +254,16 @@ def process_bytes(data, ext, ctx, depth=0):
     if head.startswith(b"\x1f\x8b"):
         try:
             # GzipFile streams through concatenated members; read() is capped
-            raw = gzip.GzipFile(fileobj=io.BytesIO(data)).read(GUNZIP_LIMIT + 1)
-            if len(raw) > GUNZIP_LIMIT:
-                raise ValueError("gzip data larger than limit")
+            gz, parts, total = gzip.GzipFile(fileobj=io.BytesIO(data)), [], 0
+            while True:
+                part = gz.read(64 * 2**20)
+                if not part:
+                    break
+                total += len(part)
+                if total > GUNZIP_LIMIT:
+                    raise ValueError("gzip data larger than limit")
+                parts.append(part)
+            raw = b"".join(parts)
         except Exception:
             ctx.note("gzip_unreadable")
             return generic(data, ctx)
