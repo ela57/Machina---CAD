@@ -16,7 +16,8 @@ How to run (Python 3.12; Debian/Ubuntu)
   python3 -m deid.run transform --manifest manifest.tsv --state STATE --work WORK --out OUT
   # 3. this README
   python3 -m deid.run report    --manifest manifest.tsv --state STATE --work WORK --out OUT --readme README.txt
-STATE is private (identity map + random pseudonym key) and is never uploaded.
+STATE is private (identity map + random pseudonym key) and is never uploaded.  Optional
+STATE/seeds.txt (token<TAB>kind per line) adds identities found by manual review of folder names.
 --stop-out-gb N stops transform when OUT reaches N GB so it can be uploaded and emptied; rerunning resumes.
 """
 
