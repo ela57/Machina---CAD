@@ -323,12 +323,13 @@ def main():
 
     if a.phase in ("transform", "report"):
         tm, exact, pm, proper_only = build_matcher()
-        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm, proper_only))
-        _init_worker(tm, exact, pm, proper_only)
+        path_m = Matcher(pm, exact)
         # output paths for the whole manifest up front, so renames never collide
         newpaths, claimed = {}, set()
         for r in read_manifest(a.manifest):
-            np_ = rename_path(_W["p"], r["path"])
+            if not safe_rel(r["path"]):
+                continue
+            np_ = rename_path(path_m, r["path"])
             if np_ in claimed:
                 stem, dot, ext_ = np_.rpartition(".") if "." in np_.rsplit("/", 1)[-1] else (np_, "", "")
                 k = 2
@@ -337,6 +338,16 @@ def main():
                 np_ = f"{stem}~{k}{dot}{ext_}"
             claimed.add(np_)
             newpaths[r["path"]] = np_
+        # references to renamed files must follow the rename even where the identity in the
+        # name is not replaced in free text (short or ordinary-word identities)
+        content_m = Matcher(tm, exact, proper_only)
+        for old, new in newpaths.items():
+            ob, nb = old.rsplit("/", 1)[-1], new.rsplit("/", 1)[-1]
+            if ob != nb and len(ob) >= 6 and len(ob.encode()) == len(nb.encode()) and content_m.replace_str(ob) != nb:
+                tm.setdefault(ob.lower(), nb.lower())
+        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm, proper_only))
+        _init_worker(tm, exact, pm, proper_only)
+        orig_of = {v: k for k, v in newpaths.items()}
         if a.phase == "report":
             from .report import write_readme
             write_readme(a.readme, read_manifest(a.manifest), newpaths, defects, a.out, state / "written.tsv")
@@ -389,6 +400,9 @@ def main():
                             dst.unlink()
                         os.link(Path(out, seen[key]), dst)
                         ledger.write(f"{newp}\t{dst.stat().st_size}\t1\n")
+                        src_defect = defects.get(orig_of.get(seen[key]))
+                        if src_defect and r["path"] not in defects:
+                            defects[r["path"]] = src_defect
                     continue
                 futs[pool.submit(transform_one, str(src), dst, ext)] = (r, newp, complete)
         for fu in cf.as_completed(futs):
@@ -413,12 +427,18 @@ def main():
                     ids.setdefault(tok, kind)
             else:
                 r, newp, complete = info
-                if r["md5"] and complete:
-                    seen[r["md5"]] = newp
-                ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t0\n")
                 notes = [NOTE_DEFECTS[k] for k in NOTE_DEFECTS if res.get(k)]
                 if notes and r["path"] not in defects:
                     defects[r["path"]] = "; ".join(notes)
+                first = seen.get(r["md5"]) if r["md5"] and complete else None
+                if first and first != newp and Path(out, first).exists():
+                    (out / newp).unlink()
+                    os.link(Path(out, first), out / newp)
+                    ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t1\n")
+                    continue
+                if r["md5"] and complete:
+                    seen[r["md5"]] = newp
+                ledger.write(f"{newp}\t{(out / newp).stat().st_size}\t0\n")
         if not a.input:
             shutil.rmtree(work / f"b{bi}", ignore_errors=True)
         done.update(g for g, _gr, last in batch if last)
