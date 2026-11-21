@@ -199,7 +199,8 @@ def harvest_one(src, ext):
 # --------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["harvest", "transform"])
+    ap.add_argument("phase", choices=["harvest", "transform", "report"])
+    ap.add_argument("--readme", help="README.txt to write (report)")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--state", required=True, help="private state dir (identity map, progress)")
     ap.add_argument("--work", required=True, help="scratch dir for raw downloads")
@@ -297,7 +298,7 @@ def main():
         exact = [t for t in pm if len(t) <= 4]
         return tm, exact, pm
 
-    if a.phase == "transform":
+    if a.phase in ("transform", "report"):
         tm, exact, pm = build_matcher()
         pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm))
         _init_worker(tm, exact, pm)
@@ -313,6 +314,10 @@ def main():
                 np_ = f"{stem}~{k}{dot}{ext_}"
             claimed.add(np_)
             newpaths[r["path"]] = np_
+        if a.phase == "report":
+            from .report import write_readme
+            write_readme(a.readme, read_manifest(a.manifest), newpaths, defects, a.out)
+            return
         out = Path(a.out)
         seen = {}
         seen_file = state / "md5_out.json"
