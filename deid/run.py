@@ -14,9 +14,9 @@ import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
-from .formats import Ctx, process_bytes
+from .formats import Ctx, generic, process_bytes
 from .harvest import Harvest, harvest_file
-from .matcher import Matcher
+from .matcher import Matcher, looks_text
 from .pseudo import Registry
 
 log = logging.getLogger("deid")
@@ -82,10 +82,41 @@ def is_html_placeholder(data, ext):
 # ------------------------------------------------------------------ workers
 _W = {}
 
+NOTE_DEFECTS = {
+    "zip_unreadable": "archive could not be opened as ZIP; identifiers replaced byte-wise",
+    "zip_member_unreadable": "some ZIP members could not be read (encrypted or corrupt) and are omitted from the output archive",
+    "tar_unreadable": "archive could not be opened as TAR; identifiers replaced byte-wise",
+    "gzip_unreadable": "gzip stream unreadable or larger than 4 GiB uncompressed; identifiers replaced byte-wise",
+    "7z_unreadable": "7z archive could not be extracted; identifiers replaced byte-wise",
+    "pdf_unreadable": "file could not be parsed as PDF; identifiers replaced byte-wise",
+    "pdf_rewrite_failed": "PDF could not be re-saved after redaction; identifiers replaced byte-wise",
+    "sw_record_masked": "some identifiers inside fixed-size compressed SolidWorks records were masked with 'x' instead of a pseudonym",
+    "sw_record_unfit": "some compressed SolidWorks records could not be rewritten in place",
+}
 
-def _init_worker(token_map, exact):
-    m = Matcher(token_map, exact)
-    _W["m"] = m
+
+def safe_rel(path):
+    p = Path(path)
+    return path and not p.is_absolute() and ".." not in p.parts
+
+
+def content_tokens(ids):
+    """Tokens safe to replace inside file contents (paths use every token)."""
+    from .harvest import _dictionary
+    lower_words, proper_words = _dictionary()
+    keep = {}
+    for t, k in ids.items():
+        if len(t) < 4 or len(set(t)) <= 2:
+            continue
+        if len(t) == 4 and t in lower_words and t not in proper_words:
+            continue
+        keep[t] = k
+    return keep
+
+
+def _init_worker(token_map, exact, path_map):
+    _W["m"] = Matcher(token_map, exact)
+    _W["p"] = Matcher(path_map, exact)
 
 
 def rename_component(m, comp):
@@ -103,7 +134,7 @@ def sevenzip_rewrite(data, ctx):
         x = Path(td, "x")
         if subprocess.run(["7z", "x", "-y", f"-o{x}", str(src)], capture_output=True).returncode:
             ctx.note("7z_unreadable")
-            return ctx.m.replace(data)[0]
+            return generic(data, ctx)
         y = Path(td, "y")
         for root, _d, files in os.walk(x):
             for fn in files:
@@ -120,7 +151,7 @@ def sevenzip_rewrite(data, ctx):
 def transform_one(src, dst, ext):
     m = _W["m"]
     stats = {}
-    ctx = Ctx(m, lambda c: rename_component(m, c), stats)
+    ctx = Ctx(m, lambda c: rename_component(_W["p"], c), stats)
     size = os.path.getsize(src)
     dst.parent.mkdir(parents=True, exist_ok=True)
     with open(src, "rb") as f:
@@ -128,15 +159,16 @@ def transform_one(src, dst, ext):
     if size > STREAM_LIMIT and not head.startswith((b"%PDF", b"PK\x03\x04", b"\x1f\x8b")):
         # huge STEP/IGES/mesh files: chunked same-length replacement with overlap
         ov = 512
+        binary = not looks_text(head + open(src, "rb").read(8192))
         with open(src, "rb") as fi, open(dst, "wb") as fo:
             carry = b""
             while True:
                 buf = fi.read(CHUNK)
                 if not buf:
-                    fo.write(m.replace(carry)[0])
+                    fo.write(m.replace(carry, binary=binary)[0])
                     break
                 data = carry + buf
-                new, _ = m.replace(data)
+                new, _ = m.replace(data, binary=binary)
                 fo.write(new[:-ov])
                 carry = new[-ov:]
         stats["streamed"] = 1
@@ -179,12 +211,21 @@ def main():
     ap.add_argument("--only", help="only groups containing this substring")
     ap.add_argument("--stop-out-gb", type=float, default=0, help="stop when --out grows beyond this")
     ap.add_argument("--batch-gb", type=float, default=3.0, help="raw bytes per download/process batch")
-    ap.add_argument("--salt", default=os.environ.get("DEID_SALT", "machina-deid"))
+    ap.add_argument("--salt", default=os.environ.get("DEID_SALT"),
+                    help="secret pseudonym key; default: random key kept in --state/salt")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     state = Path(a.state)
     state.mkdir(parents=True, exist_ok=True)
+    os.chmod(state, 0o700)  # holds the identity map
+    if a.salt is None:
+        salt_file = state / "salt"
+        if not salt_file.exists():
+            salt_file.write_bytes(os.urandom(32).hex().encode())
+        a.salt = salt_file.read_text().strip()
     rows = read_manifest(a.manifest)
+    unsafe = [r for r in rows if not safe_rel(r["path"]) or not safe_rel(r["url"])]
+    rows = [r for r in rows if safe_rel(r["path"]) and safe_rel(r["url"])]
     if a.input:
         have = set()
         for root, _d, files in os.walk(a.input):
@@ -209,6 +250,8 @@ def main():
     reg = Registry.load(state / "pseudonyms.json", a.salt.encode())
     work = Path(a.work)
     defects = json.loads((state / "defects.json").read_text()) if (state / "defects.json").exists() else {}
+    for r in unsafe:
+        defects[r["path"]] = "manifest path is absolute or contains '..'; not processed"
     dl = cf.ThreadPoolExecutor(a.dl_jobs)
 
     def fetch(r, sub):
@@ -248,15 +291,28 @@ def main():
                 if line and not line.startswith("#"):
                     tok, _, kind = line.partition("\t")
                     ids.setdefault(tok.lower(), kind or "org")
-        tm = {t: reg.get(t, k) for t, k in ids.items()}
+        pm = {t: reg.get(t, k) for t, k in ids.items()}
         reg.save(state / "pseudonyms.json")
-        exact = [t for t in tm if len(t) <= 4]
-        return tm, exact
+        tm = {t: pm[t] for t in content_tokens(ids)}
+        exact = [t for t in pm if len(t) <= 4]
+        return tm, exact, pm
 
     if a.phase == "transform":
-        tm, exact = build_matcher()
-        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact))
-        _init_worker(tm, exact)
+        tm, exact, pm = build_matcher()
+        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm))
+        _init_worker(tm, exact, pm)
+        # output paths for the whole manifest up front, so renames never collide
+        newpaths, claimed = {}, set()
+        for r in read_manifest(a.manifest):
+            np_ = rename_path(_W["p"], r["path"])
+            if np_ in claimed:
+                stem, dot, ext_ = np_.rpartition(".") if "." in np_.rsplit("/", 1)[-1] else (np_, "", "")
+                k = 2
+                while f"{stem}~{k}{dot}{ext_}" in claimed:
+                    k += 1
+                np_ = f"{stem}~{k}{dot}{ext_}"
+            claimed.add(np_)
+            newpaths[r["path"]] = np_
         out = Path(a.out)
         seen = {}
         seen_file = state / "md5_out.json"
@@ -280,28 +336,31 @@ def main():
                 defects[r["path"]] = "missing from mirror"
                 continue
             sz = src.stat().st_size
+            complete = sz == r["size"] and sz > 0
             if r["size"] == 0 or sz == 0:
                 defects[r["path"]] = "zero-byte file in source" if r["size"] == 0 else "not downloadable from mirror"
             if a.phase == "harvest":
                 if r["md5"] and r["md5"] in harvested_md5:
                     continue
-                harvested_md5.add(r["md5"])
+                if complete and r["md5"]:
+                    harvested_md5.add(r["md5"])
                 futs[pool.submit(harvest_one, str(src), ext)] = r
             else:
                 with open(src, "rb") as f:
                     head = f.read(512)
                 if sz and is_html_placeholder(head, ext):
                     defects[r["path"]] = "source file is an HTML 'Not Found' page, not a %s file" % (ext or "data")
-                newp = rename_path(_W["m"], r["path"])
+                newp = newpaths[r["path"]]
                 dst = out / newp
-                key = r["md5"] or ""
+                key = r["md5"] if complete else ""
                 if key and key in seen and Path(out, seen[key]).exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if dst.exists():
-                        dst.unlink()
-                    os.link(Path(out, seen[key]), dst)
+                    if seen[key] != newp:
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        if dst.exists():
+                            dst.unlink()
+                        os.link(Path(out, seen[key]), dst)
                     continue
-                futs[pool.submit(transform_one, str(src), dst, ext)] = (r, newp)
+                futs[pool.submit(transform_one, str(src), dst, ext)] = (r, newp, complete)
         for fu in cf.as_completed(futs):
             info = futs[fu]
             try:
@@ -315,18 +374,19 @@ def main():
                     src = Path(a.input, r["path"]) if a.input else work / f"b{bi}" / r["path"]
                     data = src.read_bytes()
                     (out / newp).parent.mkdir(parents=True, exist_ok=True)
-                    (out / newp).write_bytes(_W["m"].replace(data)[0])
+                    (out / newp).write_bytes(_W["m"].replace(data, binary=not looks_text(data))[0])
                     defects.setdefault(r["path"], "format rewrite failed (%s); identifiers replaced byte-wise" % type(e).__name__)
                 continue
             if a.phase == "harvest":
                 for tok, kind in res.items():
                     ids.setdefault(tok, kind)
             else:
-                r, newp = info
-                if r["md5"]:
+                r, newp, complete = info
+                if r["md5"] and complete:
                     seen[r["md5"]] = newp
-                if res.get("sw_record_unfit"):
-                    defects.setdefault(r["path"], "some compressed SolidWorks records could not be rewritten in place")
+                notes = [NOTE_DEFECTS[k] for k in NOTE_DEFECTS if res.get(k)]
+                if notes and r["path"] not in defects:
+                    defects[r["path"]] = "; ".join(notes)
         if not a.input:
             shutil.rmtree(work / f"b{bi}", ignore_errors=True)
         done.update(g for g, _gr, last in batch if last)
