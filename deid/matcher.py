@@ -43,10 +43,11 @@ def _counted_string(data, start, end):
 
 
 class Matcher:
-    def __init__(self, token_map, exact_case=(), proper_only=()):
+    def __init__(self, token_map, exact_case=(), proper_only=(), whole=()):
         """token_map: lowercase token -> lowercase pseudonym (same length)."""
         self.token_map = dict(token_map)
         self.exact = set(exact_case)
+        self.whole = set(whole)  # whole names only (file-name aliases): no letter/digit either side
         self.proper_only = set(proper_only)  # also ordinary words: replace only when Capitalized
         self.auto = ahocorasick.Automaton()
         n = 0
@@ -132,6 +133,8 @@ class Matcher:
         p = self._char_before(data, start, enc)
         n = self._char_after(data, end, enc)
         if tok in self.exact and orig != tok and orig != tok.upper() and orig != tok.capitalize():
+            return False
+        if tok in self.whole and ((p is not None and p.isalnum()) or (n is not None and n.isalnum())):
             return False
         long_tok = len(tok) >= 8
         if p is not None and p.isalnum():

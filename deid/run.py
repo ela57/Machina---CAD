@@ -136,8 +136,8 @@ def content_tokens(ids):
     return keep, proper_only
 
 
-def _init_worker(token_map, exact, path_map, proper_only=()):
-    _W["m"] = Matcher(token_map, exact, proper_only)
+def _init_worker(token_map, exact, path_map, proper_only=(), whole=()):
+    _W["m"] = Matcher(token_map, exact, proper_only, whole)
     _W["p"] = Matcher(path_map, exact)
 
 
@@ -346,12 +346,15 @@ def main():
         # references to renamed files must follow the rename even where the identity in the
         # name is not replaced in free text (short or ordinary-word identities)
         content_m = Matcher(tm, exact, proper_only)
+        aliases = set()
         for old, new in newpaths.items():
             ob, nb = old.rsplit("/", 1)[-1], new.rsplit("/", 1)[-1]
             if ob != nb and len(ob) >= 6 and len(ob.encode()) == len(nb.encode()) and content_m.replace_str(ob) != nb:
-                tm.setdefault(ob.lower(), nb.lower())
-        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm, proper_only))
-        _init_worker(tm, exact, pm, proper_only)
+                if ob.lower() not in tm:
+                    tm[ob.lower()] = nb.lower()
+                    aliases.add(ob.lower())
+        pool = cf.ProcessPoolExecutor(a.jobs, initializer=_init_worker, initargs=(tm, exact, pm, proper_only, aliases))
+        _init_worker(tm, exact, pm, proper_only, aliases)
         orig_of = {v: k for k, v in newpaths.items()}
         if a.phase == "report":
             from .report import write_readme
