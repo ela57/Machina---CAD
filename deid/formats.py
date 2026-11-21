@@ -253,18 +253,10 @@ def process_bytes(data, ext, ctx, depth=0):
         return rewrite_zip(data, ctx, depth)
     if head.startswith(b"\x1f\x8b"):
         try:
-            parts, rest, total = [], data, 0
-            while rest[:2] == b"\x1f\x8b":  # concatenated members are joined into one
-                d = zlib.decompressobj(16 + zlib.MAX_WBITS)
-                part = d.decompress(rest, GUNZIP_LIMIT - total)
-                if d.unconsumed_tail or not d.eof:
-                    raise ValueError("gzip member too large or truncated")
-                parts.append(part)
-                total += len(part)
-                rest = d.unused_data
-            if rest.strip(b"\0"):
-                raise ValueError("trailing data after gzip members")
-            raw = b"".join(parts)
+            # GzipFile streams through concatenated members; read() is capped
+            raw = gzip.GzipFile(fileobj=io.BytesIO(data)).read(GUNZIP_LIMIT + 1)
+            if len(raw) > GUNZIP_LIMIT:
+                raise ValueError("gzip data larger than limit")
         except Exception:
             ctx.note("gzip_unreadable")
             return generic(data, ctx)
