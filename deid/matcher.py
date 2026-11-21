@@ -33,6 +33,15 @@ def _printable_run(data, start, end, limit=16):
     return j - i
 
 
+def _counted_string(data, start, end):
+    """data[start:end] is a whole (or leading part of a) length-prefixed string, e.g. an OLE
+    VT_LPSTR property: 4-byte little-endian length (incl. NUL) right before it."""
+    if start < 4:
+        return False
+    n = int.from_bytes(data[start - 4:start], "little")
+    return end - start < n <= 4096 and data[start + n - 1:start + n] == b"\0"
+
+
 class Matcher:
     def __init__(self, token_map, exact_case=(), proper_only=()):
         """token_map: lowercase token -> lowercase pseudonym (same length)."""
@@ -115,7 +124,7 @@ class Matcher:
         if binary and enc != "utf-16-le" and len(tok) < 8:
             # inside binary data only rewrite tokens that sit in a real text string, so
             # compressed or numeric payloads are never altered by a chance byte match
-            if _printable_run(data, start, end) < max(8, end - start + 3):
+            if _printable_run(data, start, end) < max(8, end - start + 3) and not _counted_string(data, start, end):
                 return False
         f, l = orig[0], orig[-1]
         if tok in self.proper_only and not f.isupper():
@@ -133,7 +142,14 @@ class Matcher:
                 return False
         return True
 
-    def replace(self, data: bytes, filler=False, binary=False):
+    def matched(self, data, binary=False):
+        """Counter of tokens that replace() would rewrite in data."""
+        import collections
+        got = []
+        self.replace(data, binary=binary, collect=got)
+        return collections.Counter(got)
+
+    def replace(self, data: bytes, filler=False, binary=False, collect=None):
         """Return (new_bytes, count). filler=True writes a low-entropy 'x' run instead of the
         pseudonym (last resort where a pseudonym would not fit a fixed compressed size)."""
         if self.empty or not data:
@@ -173,6 +189,8 @@ class Matcher:
             out[start:end] = rep
             last = end
             cnt += 1
+            if collect is not None:
+                collect.append(tok)
         return bytes(out), cnt
 
     def replace_str(self, s: str):
