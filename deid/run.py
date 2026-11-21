@@ -262,7 +262,7 @@ def main():
     done = set(done_file.read_text().split("\n")) if done_file.exists() else set()
     ids_file = state / "ids.json"
     ids = json.loads(ids_file.read_text()) if ids_file.exists() else {}
-    seeds = Path(__file__).with_name("seeds.txt")
+    seeds = state / "seeds.txt"  # extra identities found by manual review; private, like ids.json
 
     if a.phase == "harvest":
         h = Harvest()
