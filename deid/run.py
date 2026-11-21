@@ -109,7 +109,9 @@ finland netherlands holland belgium switzerland austria portugal greece turkey i
 ukraine vietnam thailand singapore malaysia indonesia iran pakistan argentina chile colombia
 peru york london paris berlin tokyo beijing shanghai california texas florida kentucky ohio
 washington oregon illinois virginia georgia carolina boston chicago seattle jesus christ
-god user-images git-lfs raw.githubusercontent github gitlab gitee
+god user-images git-lfs raw.githubusercontent github gitlab gitee nature hope honor bright judges
+mars thai python centre center miles true-nature research-collection google-analytics a-pdf
+pdf-tools swing-layout
 """.split())
 
 
@@ -129,7 +131,9 @@ def content_tokens(ids):
             continue
         if t in lower_words:
             name = t in proper_words or k in ("person", "first", "last")
-            if not name and (len(t) == 4 or zipf_frequency(t, "en") >= 4.0):
+            if t not in proper_words and zipf_frequency(t, "en") >= 4.0:
+                continue
+            if not name and len(t) == 4:
                 continue
             proper_only.add(t)
         keep[t] = k
